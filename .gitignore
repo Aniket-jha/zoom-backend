@@ -1,0 +1,22 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-ssr
+
+# Env files (keep .env.example tracked)
+.env
+*.env.local
+
+# Secrets and local data
+firebase-service-account.json
+data/tokens.json
