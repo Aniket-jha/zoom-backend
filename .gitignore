@@ -18,5 +18,6 @@ dist-ssr
 *.env.local
 
 # Secrets and local data
-zoomappplatform-firebase-adminsdk-fbsvc-5024b50b22.json
+firebase-service-account.json
+zoomappplatform-firebase-adminsdk-*.json
 data/tokens.json
