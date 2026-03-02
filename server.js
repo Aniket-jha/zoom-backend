@@ -27,6 +27,10 @@ const swaggerSpec = swaggerJsdoc({
     },
     servers: [
       {
+        url: 'https://zoom-backend-ht3i.onrender.com',
+        description: 'Production',
+      },
+      {
         url: 'http://localhost:5050',
         description: 'Local dev',
       },
