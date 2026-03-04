@@ -31,8 +31,8 @@ const swaggerSpec = swaggerJsdoc({
         description: 'Production',
       },
       {
-        url: 'http://localhost:5050',
-        description: 'Local dev',
+        url: 'https://zoom-backend-ht3i.onrender.com',
+        description: 'Production',
       },
     ],
   },
@@ -52,6 +52,7 @@ const {
   FIREBASE_SERVICE_ACCOUNT_PATH,
   FIREBASE_SERVICE_ACCOUNT_JSON,
   FIREBASE_DATABASE_URL,
+  MOBILE_FRONTEND_URL,
 } = process.env
 
 let firebaseApp = null
@@ -239,12 +240,14 @@ app.get('/oauth/authorize', (req, res) => {
     requireEnv(ZOOM_OAUTH_REDIRECT_URL, 'ZOOM_OAUTH_REDIRECT_URL')
 
     const adminId = req.query.adminId
+    const target = req.query.target
     const state = adminId || 'unknown'
+    const targetState = target ? `${state}|${target}` : state
     const authUrl =
       `https://zoom.us/oauth/authorize?response_type=code` +
       `&client_id=${ZOOM_OAUTH_CLIENT_ID}` +
       `&redirect_uri=${encodeURIComponent(ZOOM_OAUTH_REDIRECT_URL)}` +
-      `&state=${encodeURIComponent(state)}`
+      `&state=${encodeURIComponent(targetState)}`
 
     res.redirect(authUrl)
   } catch (error) {
@@ -281,10 +284,15 @@ app.get('/oauth/callback', async (req, res) => {
       return res.status(400).send('Missing authorization code')
     }
 
+    const rawState = typeof state === 'string' ? state : ''
+    const [adminId, target] = rawState.split('|')
     const tokenData = await exchangeCodeForToken(code)
-    await saveTokenForAdmin(state || 'unknown', tokenData)
+    await saveTokenForAdmin(adminId || 'unknown', tokenData)
 
-    const redirectTo = FRONTEND_URL || 'http://localhost:5173'
+    const redirectTo =
+      target === 'mobile' && MOBILE_FRONTEND_URL
+        ? MOBILE_FRONTEND_URL
+        : FRONTEND_URL || 'http://localhost:5173'
     res.redirect(`${redirectTo}?zoom=connected`)
   } catch (error) {
     const message = error.response?.data || error.message
@@ -546,6 +554,7 @@ app.get('/api/admin-meetings', async (req, res) => {
     res.status(500).json({ error: error.message })
   }
 })
+
 app.listen(port, () => {
   console.log(`Zoom backend listening on ${port}`)
 })
