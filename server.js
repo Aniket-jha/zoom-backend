@@ -82,44 +82,36 @@ const getFirebaseApp = async () => {
   return firebaseApp
 }
 
-const tokenStoreDir = path.join(process.cwd(), 'data')
-const tokenStorePath = path.join(tokenStoreDir, 'tokens.json')
-
 const requireEnv = (value, name) => {
   if (!value) {
     throw new Error(`Missing required env var: ${name}`)
   }
 }
 
-const ensureTokenStore = async () => {
-  await fs.mkdir(tokenStoreDir, { recursive: true })
-  try {
-    await fs.access(tokenStorePath)
-  } catch {
-    await fs.writeFile(tokenStorePath, JSON.stringify({}), 'utf-8')
-  }
-}
-
-const readTokens = async () => {
-  await ensureTokenStore()
-  const raw = await fs.readFile(tokenStorePath, 'utf-8')
-  return JSON.parse(raw || '{}')
-}
-
-const writeTokens = async (tokens) => {
-  await ensureTokenStore()
-  await fs.writeFile(tokenStorePath, JSON.stringify(tokens, null, 2), 'utf-8')
+const getFirestore = async () => {
+  await getFirebaseApp()
+  return admin.firestore()
 }
 
 const getTokenForAdmin = async (adminId) => {
-  const tokens = await readTokens()
-  return tokens[adminId] || null
+  if (!adminId) return null
+  const firestore = await getFirestore()
+  const docRef = firestore.collection('zoom_tokens').doc(adminId)
+  const docSnap = await docRef.get()
+  return docSnap.exists ? docSnap.data() : null
 }
 
 const saveTokenForAdmin = async (adminId, tokenData) => {
-  const tokens = await readTokens()
-  tokens[adminId] = tokenData
-  await writeTokens(tokens)
+  if (!adminId) return
+  const firestore = await getFirestore()
+  const docRef = firestore.collection('zoom_tokens').doc(adminId)
+  await docRef.set(
+    {
+      ...tokenData,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  )
 }
 
 const exchangeCodeForToken = async (code) => {
@@ -195,6 +187,19 @@ const getValidAccessToken = async (adminId) => {
   const refreshed = await refreshAccessToken(token.refresh_token)
   await saveTokenForAdmin(adminId, refreshed)
   return refreshed.access_token
+}
+
+const getBearerToken = (req) => {
+  const header = req.headers.authorization || ''
+  if (!header.startsWith('Bearer ')) return null
+  return header.slice('Bearer '.length).trim()
+}
+
+const verifyFirebaseIdToken = async (req) => {
+  const idToken = getBearerToken(req)
+  if (!idToken) return null
+  await getFirebaseApp()
+  return admin.auth().verifyIdToken(idToken)
 }
 
 /**
@@ -333,6 +338,55 @@ app.get('/api/zoom/status', async (req, res) => {
     }
     const token = await getTokenForAdmin(adminId)
     res.json({ connected: !!token })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/**
+ * @swagger
+ * /api/zoom/token:
+ *   get:
+ *     summary: Fetch Zoom access token for an admin (requires Firebase ID token)
+ *     tags: [Zoom]
+ *     parameters:
+ *       - in: query
+ *         name: adminId
+ *         schema:
+ *           type: string
+ *         description: Admin identifier (defaults to caller uid)
+ *     responses:
+ *       200:
+ *         description: Access token payload
+ *       401:
+ *         description: Missing or invalid auth token
+ *       403:
+ *         description: adminId does not match caller
+ */
+app.get('/api/zoom/token', async (req, res) => {
+  try {
+    const decoded = await verifyFirebaseIdToken(req)
+    if (!decoded) {
+      return res.status(401).json({ error: 'Missing or invalid auth token' })
+    }
+
+    const adminId = req.query.adminId || decoded.uid
+    if (adminId !== decoded.uid) {
+      return res.status(403).json({ error: 'Forbidden' })
+    }
+
+    const accessToken = await getValidAccessToken(adminId)
+    if (!accessToken) {
+      return res.status(404).json({ error: 'Zoom not connected for this admin' })
+    }
+
+    const tokenData = await getTokenForAdmin(adminId)
+    res.json({
+      access_token: accessToken,
+      token_type: tokenData?.token_type || 'Bearer',
+      expires_at: tokenData?.expires_at || null,
+      scope: tokenData?.scope || null,
+    })
   } catch (error) {
     res.status(500).json({ error: error.message })
   }
