@@ -505,14 +505,15 @@ app.post('/api/zoom/meetings', async (req, res) => {
       return res.status(401).json({ error: 'Zoom not connected for this admin' })
     }
 
-    const {
-      topic,
-      startTime,
-      duration,
-      timezone,
-      agenda,
-      password,
-    } = req.body
+  const {
+    topic,
+    startTime,
+    duration,
+    timezone,
+    agenda,
+    password,
+    autoRecording,
+  } = req.body
 
     const payload = {
       topic: topic || 'New Meeting',
@@ -521,17 +522,21 @@ app.post('/api/zoom/meetings', async (req, res) => {
       duration: duration || 30,
       timezone: timezone || 'UTC',
       agenda: agenda || '',
-      settings: {
-        join_before_host: true,
-        waiting_room: false,
-        mute_upon_entry: true,
-        meeting_authentication: false,
-      },
-    }
+    settings: {
+      join_before_host: true,
+      waiting_room: false,
+      mute_upon_entry: true,
+      meeting_authentication: false,
+    },
+  }
 
-    if (password) {
-      payload.password = password
-    }
+  if (autoRecording && autoRecording !== 'none') {
+    payload.settings.auto_recording = autoRecording
+  }
+
+  if (password) {
+    payload.password = password
+  }
 
     const hostUser = ZOOM_API_HOST_USER || 'me'
     const response = await axios.post(
@@ -548,6 +553,87 @@ app.post('/api/zoom/meetings', async (req, res) => {
   } catch (error) {
     const message = error.response?.data || error.message
     res.status(500).json({ error: message })
+  }
+})
+
+/**
+ * @swagger
+ * /api/zoom/recording:
+ *   patch:
+ *     summary: Control cloud recording for a live meeting
+ *     tags: [Zoom]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               adminId:
+ *                 type: string
+ *               meetingId:
+ *                 type: string
+ *               action:
+ *                 type: string
+ *                 enum: [start, stop, pause, resume]
+ *             required:
+ *               - adminId
+ *               - meetingId
+ *               - action
+ *     responses:
+ *       202:
+ *         description: Recording control accepted
+ *       401:
+ *         description: Zoom not connected
+ *       403:
+ *         description: Forbidden
+ */
+app.patch('/api/zoom/recording', async (req, res) => {
+  try {
+    const decoded = await verifyFirebaseIdToken(req)
+    if (!decoded) {
+      return res.status(401).json({ error: 'Missing or invalid auth token' })
+    }
+
+    const { adminId, meetingId, action } = req.body
+    if (!adminId || !meetingId || !action) {
+      return res.status(400).json({ error: 'adminId, meetingId, action required' })
+    }
+    if (adminId !== decoded.uid) {
+      return res.status(403).json({ error: 'Forbidden' })
+    }
+
+    const methodMap = {
+      start: 'recording.start',
+      stop: 'recording.stop',
+      pause: 'recording.pause',
+      resume: 'recording.resume',
+    }
+    const method = methodMap[action]
+    if (!method) {
+      return res.status(400).json({ error: 'Invalid action' })
+    }
+
+    const accessToken = await getValidAccessToken(adminId)
+    if (!accessToken) {
+      return res.status(401).json({ error: 'Zoom not connected for this admin' })
+    }
+
+    const response = await axios.patch(
+      `https://api.zoom.us/v2/live_meetings/${meetingId}/events`,
+      { method },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    )
+
+    res.status(response.status).json(response.data || { ok: true })
+  } catch (error) {
+    const message = error.response?.data || error.message
+    const status = error.response?.status || 500
+    res.status(status).json({ error: message })
   }
 })
 
