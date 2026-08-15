@@ -48,7 +48,6 @@ const {
   FRONTEND_URL,
   ZOOM_MEETING_SDK_KEY,
   ZOOM_MEETING_SDK_SECRET,
-  ZOOM_API_HOST_USER,
   FIREBASE_SERVICE_ACCOUNT_PATH,
   FIREBASE_SERVICE_ACCOUNT_JSON,
   FIREBASE_DATABASE_URL,
@@ -538,9 +537,14 @@ app.post('/api/zoom/meetings', async (req, res) => {
     payload.password = password
   }
 
-    const hostUser = ZOOM_API_HOST_USER || 'me'
+    // Always create the meeting for the token's own owner ("me"). This
+    // endpoint is multi-tenant: accessToken belongs to whichever admin
+    // connected via OAuth, so the meeting must be hosted under that same
+    // account. A fixed/hardcoded host user here would only work for one
+    // specific Zoom account and break for every other admin who connects
+    // (this is what was happening — see PR description).
     const response = await axios.post(
-      `https://api.zoom.us/v2/users/${hostUser}/meetings`,
+      `https://api.zoom.us/v2/users/me/meetings`,
       payload,
       {
         headers: {
@@ -551,8 +555,10 @@ app.post('/api/zoom/meetings', async (req, res) => {
 
     res.json(response.data)
   } catch (error) {
+    const status = error.response?.status || 500
     const message = error.response?.data || error.message
-    res.status(500).json({ error: message })
+    console.error('Error creating Zoom meeting:', message)
+    res.status(status).json({ error: message })
   }
 })
 
