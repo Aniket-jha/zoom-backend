@@ -390,6 +390,42 @@ app.get('/api/zoom/token', async (req, res) => {
     res.status(500).json({ error: error.message })
   }
 })
+
+app.get('/api/zoom/zak', async (req, res) => {
+  try {
+    const decoded = await verifyFirebaseIdToken(req)
+    if (!decoded) {
+      return res.status(401).json({ error: 'Missing or invalid auth token' })
+    }
+
+    const adminId = req.query.adminId || decoded.uid
+    if (adminId !== decoded.uid) {
+      return res.status(403).json({ error: 'Forbidden' })
+    }
+
+    const accessToken = await getValidAccessToken(adminId)
+    if (!accessToken) {
+      return res.status(404).json({ error: 'Zoom not connected for this admin' })
+    }
+
+    const response = await axios.get('https://api.zoom.us/v2/users/me/zak', {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    })
+
+    res.json({
+      zak: response.data?.token || '',
+    })
+  } catch (error) {
+    const message =
+      error.response?.data?.message ||
+      error.response?.data?.error ||
+      error.message
+    res.status(500).json({ error: message })
+  }
+})
+
 /**
  * @swagger
  * /api/zoom/signature:
@@ -436,6 +472,11 @@ app.post('/api/zoom/signature', (req, res) => {
 
     const now = Math.floor(Date.now() / 1000)
     const payload = {
+      // Zoom's Meeting SDK now warns "appKey is required to be included in
+      // the signature" and that sdkKey is deprecated post-v5.0.0 in favor
+      // of appKey. Keep both for now — appKey for current/future SDK
+      // versions, sdkKey for compatibility with anything still reading it.
+      appKey: ZOOM_MEETING_SDK_KEY,
       sdkKey: ZOOM_MEETING_SDK_KEY,
       mn: meetingNumber,
       role: role ?? 0,
