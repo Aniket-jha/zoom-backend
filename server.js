@@ -439,7 +439,7 @@ app.get('/api/zoom/zak', async (req, res) => {
       return res.status(404).json({ error: 'Zoom not connected for this admin' })
     }
 
-    const response = await axios.get('https://api.zoom.us/v2/users/me/zak', {
+    const response = await axios.get('https://api.zoom.us/v2/users/me/token?type=zak', {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
