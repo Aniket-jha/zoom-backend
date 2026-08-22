@@ -87,6 +87,37 @@ const requireEnv = (value, name) => {
   }
 }
 
+const getMeetingSdkCredentials = () => {
+  const meetingSdkKey = ZOOM_OAUTH_CLIENT_ID || ZOOM_MEETING_SDK_KEY
+  const meetingSdkSecret = ZOOM_OAUTH_CLIENT_SECRET || ZOOM_MEETING_SDK_SECRET
+
+  requireEnv(
+    meetingSdkKey,
+    ZOOM_OAUTH_CLIENT_ID ? 'ZOOM_OAUTH_CLIENT_ID' : 'ZOOM_MEETING_SDK_KEY'
+  )
+  requireEnv(
+    meetingSdkSecret,
+    ZOOM_OAUTH_CLIENT_SECRET
+      ? 'ZOOM_OAUTH_CLIENT_SECRET'
+      : 'ZOOM_MEETING_SDK_SECRET'
+  )
+
+  if (
+    ZOOM_OAUTH_CLIENT_ID &&
+    ZOOM_MEETING_SDK_KEY &&
+    ZOOM_OAUTH_CLIENT_ID !== ZOOM_MEETING_SDK_KEY
+  ) {
+    console.warn(
+      'ZOOM_OAUTH_CLIENT_ID and ZOOM_MEETING_SDK_KEY differ. Using OAuth client credentials for Meeting SDK signatures.'
+    )
+  }
+
+  return {
+    meetingSdkKey,
+    meetingSdkSecret,
+  }
+}
+
 const getFirestore = async () => {
   await getFirebaseApp()
   return admin.firestore()
@@ -461,8 +492,7 @@ app.get('/api/zoom/zak', async (req, res) => {
  */
 app.post('/api/zoom/signature', (req, res) => {
   try {
-    requireEnv(ZOOM_MEETING_SDK_KEY, 'ZOOM_MEETING_SDK_KEY')
-    requireEnv(ZOOM_MEETING_SDK_SECRET, 'ZOOM_MEETING_SDK_SECRET')
+    const { meetingSdkKey, meetingSdkSecret } = getMeetingSdkCredentials()
 
     const { meetingNumber, role } = req.body
 
@@ -476,8 +506,8 @@ app.post('/api/zoom/signature', (req, res) => {
       // the signature" and that sdkKey is deprecated post-v5.0.0 in favor
       // of appKey. Keep both for now — appKey for current/future SDK
       // versions, sdkKey for compatibility with anything still reading it.
-      appKey: ZOOM_MEETING_SDK_KEY,
-      sdkKey: ZOOM_MEETING_SDK_KEY,
+      appKey: meetingSdkKey,
+      sdkKey: meetingSdkKey,
       mn: meetingNumber,
       role: role ?? 0,
       iat: now - 30,
@@ -485,7 +515,7 @@ app.post('/api/zoom/signature', (req, res) => {
       tokenExp: now + 2 * 60 * 60,
     }
 
-    const signature = jwt.sign(payload, ZOOM_MEETING_SDK_SECRET, {
+    const signature = jwt.sign(payload, meetingSdkSecret, {
       algorithm: 'HS256',
     })
 
