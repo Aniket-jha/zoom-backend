@@ -459,11 +459,19 @@ app.get('/api/zoom/zak', async (req, res) => {
       })
     }
 
-    const response = await axios.get('https://api.zoom.us/v2/users/me/zak', {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    })
+    // Zoom's actual ZAK endpoint for a user-level OAuth app is
+    // /users/me/token?type=zak — not /users/me/zak, which is what this
+    // used to call. That wrong path is why ZoomMtg.join() as host was
+    // failing with errorCode 3265 "Not support start meeting via
+    // tokens": the SDK was receiving something other than a real ZAK.
+    const response = await axios.get(
+      'https://api.zoom.us/v2/users/me/token?type=zak',
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    )
 
     res.json({
       zak: response.data?.token || '',
