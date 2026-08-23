@@ -446,18 +446,20 @@ app.get('/api/zoom/zak', async (req, res) => {
       .filter(Boolean)
 
     const hasZakScope =
+      grantedScopes.includes('user:read:zak') ||
+      grantedScopes.includes('user:read:zak:admin') ||
       grantedScopes.includes('user:read:token') ||
       grantedScopes.includes('user:read:token:admin')
 
     if (!hasZakScope) {
       return res.status(403).json({
         error:
-          'Connected Zoom token does not include user:read:token scope. Disconnect and reconnect Zoom after adding the scope in Marketplace.',
+          'Connected Zoom token does not include a ZAK-compatible scope. Required one of: user:read:zak, user:read:zak:admin, user:read:token, user:read:token:admin. Disconnect and reconnect Zoom after updating the scope in Marketplace.',
         scope: tokenData?.scope || '',
       })
     }
 
-    const response = await axios.get('https://api.zoom.us/v2/users/me/token?type=zak', {
+    const response = await axios.get('https://api.zoom.us/v2/users/me/zak', {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
