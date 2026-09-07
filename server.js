@@ -377,7 +377,7 @@ app.get('/api/zoom/status', async (req, res) => {
  * @swagger
  * /api/zoom/token:
  *   get:
- *     summary: Fetch Zoom access token for an admin (requires Firebase ID token)
+ *     summary: Check Zoom connection status/metadata for an admin (requires Firebase ID token)
  *     tags: [Zoom]
  *     parameters:
  *       - in: query
@@ -387,7 +387,7 @@ app.get('/api/zoom/status', async (req, res) => {
  *         description: Admin identifier (defaults to caller uid)
  *     responses:
  *       200:
- *         description: Access token payload
+ *         description: Connection metadata (no token value)
  *       401:
  *         description: Missing or invalid auth token
  *       403:
@@ -410,9 +410,18 @@ app.get('/api/zoom/token', async (req, res) => {
       return res.status(404).json({ error: 'Zoom not connected for this admin' })
     }
 
+    // The frontend only ever needs to know THAT a valid token exists and
+    // when it expires (to show "Connected" / "Refresh token" UI) — it
+    // never sends the token value anywhere itself, since every actual
+    // Zoom API call is proxied through this backend. Returning the raw
+    // access_token here just puts a live OAuth credential into an HTTP
+    // response body for no functional reason, which is exactly the
+    // "Zoom OAuth Tokens in HTTP Responses" finding from Zoom's security
+    // review (OWASP A04:2021 / CWE-200). The token itself never needs to
+    // leave the server.
     const tokenData = await getTokenForAdmin(adminId)
     res.json({
-      access_token: accessToken,
+      connected: true,
       token_type: tokenData?.token_type || 'Bearer',
       expires_at: tokenData?.expires_at || null,
       scope: tokenData?.scope || null,
