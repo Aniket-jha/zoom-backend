@@ -500,6 +500,112 @@ app.get('/api/zoom/zak', async (req, res) => {
 
 /**
  * @swagger
+ * /api/zoom/obf:
+ *   get:
+ *     summary: Fetch an OBF (On-Behalf-Of) token, scoped to one meeting, for the mobile Meeting SDK to join as that admin
+ *     tags: [Zoom]
+ *     parameters:
+ *       - in: query
+ *         name: adminId
+ *         schema:
+ *           type: string
+ *         description: Admin identifier whose OAuth connection to use (defaults to caller uid)
+ *       - in: query
+ *         name: meetingId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The meeting this OBF token authorizes joining
+ *     responses:
+ *       200:
+ *         description: OBF token payload
+ *       400:
+ *         description: Missing meetingId
+ *       401:
+ *         description: Missing or invalid auth token
+ *       403:
+ *         description: adminId does not match caller, or missing scope
+ */
+app.get('/api/zoom/obf', async (req, res) => {
+  try {
+    const decoded = await verifyFirebaseIdToken(req)
+    if (!decoded) {
+      return res.status(401).json({ error: 'Missing or invalid auth token' })
+    }
+
+    const adminId = req.query.adminId || decoded.uid
+    if (adminId !== decoded.uid) {
+      return res.status(403).json({ error: 'Forbidden' })
+    }
+
+    const meetingId = req.query.meetingId
+    if (!meetingId) {
+      return res.status(400).json({ error: 'meetingId is required' })
+    }
+
+    const accessToken = await getValidAccessToken(adminId)
+    if (!accessToken) {
+      return res.status(404).json({ error: 'Zoom not connected for this admin' })
+    }
+
+    const tokenData = await getTokenForAdmin(adminId)
+    const grantedScopes = String(tokenData?.scope || '')
+      .split(/[ ,]+/)
+      .map((scope) => scope.trim())
+      .filter(Boolean)
+
+    const hasObfScope =
+      grantedScopes.includes('user:read:token') ||
+      grantedScopes.includes('user:read:token:admin')
+
+    if (!hasObfScope) {
+      return res.status(403).json({
+        error:
+          'Connected Zoom token does not include an OBF-compatible scope. Required one of: user:read:token, user:read:token:admin. Disconnect and reconnect Zoom after updating the scope in Marketplace.',
+        scope: tokenData?.scope || '',
+      })
+    }
+
+    // OBF ("On Behalf Of") is the token the Meeting SDK now requires
+    // (since Zoom's March 2026 policy change) for an app to join a
+    // meeting on behalf of a user, when that meeting belongs to a
+    // different Zoom account than the one calling the SDK — which is
+    // exactly the mobile app's case: the meeting is created and hosted
+    // under the admin's connected Zoom account (adminId), but the SDK
+    // join happens from the mobile client. Unlike ZAK (which just proves
+    // "this is a Zoom user"), OBF is scoped to one specific meeting via
+    // meeting_id, and Zoom only issues/accepts it while that same admin
+    // is already an active participant in the meeting — the SDK app
+    // can't be the one to start it.
+    const response = await axios.get(
+      `https://api.zoom.us/v2/users/me/token?type=onbehalf&meeting_id=${encodeURIComponent(
+        meetingId
+      )}`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    )
+
+    res.json({
+      obfToken: response.data?.token || '',
+    })
+  } catch (error) {
+    const message =
+      error.response?.data?.message ||
+      error.response?.data?.error ||
+      error.message
+    const status = error.response?.status || 500
+    res.status(status).json({
+      error: message,
+      details: error.response?.data || null,
+    })
+  }
+})
+
+/**
+ * @swagger
  * /api/zoom/signature:
  *   post:
  *     summary: Create a Zoom Meeting SDK signature
