@@ -524,23 +524,44 @@ app.get('/api/zoom/zak', async (req, res) => {
  *       401:
  *         description: Missing or invalid auth token
  *       403:
- *         description: adminId does not match caller, or missing scope
+ *         description: meetingId does not belong to adminId, or missing scope
+ *       404:
+ *         description: Meeting not found, or Zoom not connected for this admin
  */
 app.get('/api/zoom/obf', async (req, res) => {
   try {
+    // Unlike /api/zoom/zak (where the caller always fetches their OWN
+    // token), the caller here is typically NOT the admin — it's a
+    // different person joining a meeting the admin owns/hosts. Requiring
+    // decoded.uid === adminId (as an earlier version of this endpoint
+    // did, copied from the ZAK pattern) would 403 every legitimate
+    // mobile join, since the joining user's Firebase uid is never the
+    // host admin's. All this endpoint should require of the CALLER is
+    // that they're a real authenticated app user; the sensitive check is
+    // that meetingId genuinely belongs to adminId (below), so nobody can
+    // farm OBF tokens for accounts/meetings they have no connection to.
     const decoded = await verifyFirebaseIdToken(req)
     if (!decoded) {
       return res.status(401).json({ error: 'Missing or invalid auth token' })
     }
 
-    const adminId = req.query.adminId || decoded.uid
-    if (adminId !== decoded.uid) {
-      return res.status(403).json({ error: 'Forbidden' })
+    const adminId = req.query.adminId
+    const meetingId = req.query.meetingId
+    if (!adminId || !meetingId) {
+      return res.status(400).json({ error: 'adminId and meetingId are required' })
     }
 
-    const meetingId = req.query.meetingId
-    if (!meetingId) {
-      return res.status(400).json({ error: 'meetingId is required' })
+    await getFirebaseApp()
+    const meetingSnap = await admin
+      .database()
+      .ref(`meetings/${meetingId}`)
+      .once('value')
+    const meeting = meetingSnap.exists() ? meetingSnap.val() : null
+    if (!meeting) {
+      return res.status(404).json({ error: 'Meeting not found' })
+    }
+    if (meeting.adminId !== adminId) {
+      return res.status(403).json({ error: 'meetingId does not belong to adminId' })
     }
 
     const accessToken = await getValidAccessToken(adminId)
