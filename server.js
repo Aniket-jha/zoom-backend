@@ -313,24 +313,50 @@ app.get('/oauth/authorize', (req, res) => {
  *         description: Missing authorization code
  */
 app.get('/oauth/callback', async (req, res) => {
+  const { code, state } = req.query
+  const rawState = typeof state === 'string' ? state : ''
+  const [adminId, target] = rawState.split('|')
+  // MOBILE_FRONTEND_URL is expected to be the mobile app's registered
+  // custom URL scheme (e.g. zoomtest://oauth-callback), not a web page —
+  // a mobile browser-based OAuth flow has no way back into the native
+  // app from a plain https:// redirect. Falls back to the web flow
+  // below if it isn't set, same as before this change.
+  const isMobile = target === 'mobile' && Boolean(MOBILE_FRONTEND_URL)
+
   try {
-    const { code, state } = req.query
     if (!code) {
       return res.status(400).send('Missing authorization code')
     }
 
-    const rawState = typeof state === 'string' ? state : ''
-    const [adminId, target] = rawState.split('|')
     const tokenData = await exchangeCodeForToken(code)
     await saveTokenForAdmin(adminId || 'unknown', tokenData)
 
-    const redirectTo =
-      target === 'mobile' && MOBILE_FRONTEND_URL
-        ? MOBILE_FRONTEND_URL
-        : FRONTEND_URL || 'http://localhost:5173'
+    if (isMobile) {
+      const mobileParams = new URLSearchParams({
+        success: 'true',
+        adminId: adminId || '',
+      })
+      return res.redirect(`${MOBILE_FRONTEND_URL}?${mobileParams.toString()}`)
+    }
+
+    // Web flow — unchanged from before this change.
+    const redirectTo = FRONTEND_URL || 'http://localhost:5173'
     res.redirect(`${redirectTo}?zoom=connected`)
   } catch (error) {
     const message = error.response?.data || error.message
+
+    if (isMobile) {
+      // Without this, a failed exchange leaves the mobile user stranded
+      // on a raw JSON error page in the external browser with no way
+      // back into the app — deep-link back with success=false instead
+      // so the Flutter side can show its own error state.
+      const mobileParams = new URLSearchParams({
+        success: 'false',
+        error: typeof message === 'string' ? message : JSON.stringify(message),
+      })
+      return res.redirect(`${MOBILE_FRONTEND_URL}?${mobileParams.toString()}`)
+    }
+
     res.status(500).send(JSON.stringify(message))
   }
 })
