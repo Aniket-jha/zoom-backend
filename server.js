@@ -4,6 +4,7 @@ import dotenv from 'dotenv'
 import axios from 'axios'
 import jwt from 'jsonwebtoken'
 import { promises as fs } from 'fs'
+import { randomBytes } from 'crypto'
 import path from 'path'
 import admin from 'firebase-admin'
 import swaggerUi from 'swagger-ui-express'
@@ -144,6 +145,47 @@ const saveTokenForAdmin = async (adminId, tokenData) => {
   )
 }
 
+// OAuth `state` is a random one-time nonce, with the real context
+// ({adminId, target}) kept server-side. It used to be "<adminId>|<target>",
+// but Zoom's authorize page renders blank when state contains "|"
+// (%7C). A nonce also fixes a real weakness: state was just the guessable
+// adminId, so it gave no CSRF protection on the callback.
+// The `expiresAt` Timestamp lets you optionally add a Firestore TTL policy
+// on the oauth_states collection to auto-delete abandoned entries.
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000
+
+const createOAuthState = async ({ adminId, target }) => {
+  const nonce = randomBytes(24).toString('base64url')
+  const firestore = await getFirestore()
+  await firestore
+    .collection('oauth_states')
+    .doc(nonce)
+    .set({
+      adminId,
+      target: target || null,
+      expiresAt: admin.firestore.Timestamp.fromMillis(
+        Date.now() + OAUTH_STATE_TTL_MS
+      ),
+    })
+  return nonce
+}
+
+// Single-use: the entry is deleted in the same transaction that reads it,
+// so a state value can't be replayed.
+const consumeOAuthState = async (nonce) => {
+  if (!nonce) return null
+  const firestore = await getFirestore()
+  const ref = firestore.collection('oauth_states').doc(nonce)
+  const data = await firestore.runTransaction(async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists) return null
+    tx.delete(ref)
+    return snap.data()
+  })
+  if (!data || data.expiresAt.toMillis() < Date.now()) return null
+  return data
+}
+
 const exchangeCodeForToken = async (code) => {
   requireEnv(ZOOM_OAUTH_CLIENT_ID, 'ZOOM_OAUTH_CLIENT_ID')
   requireEnv(ZOOM_OAUTH_CLIENT_SECRET, 'ZOOM_OAUTH_CLIENT_SECRET')
@@ -265,24 +307,29 @@ app.get('/health', (req, res) => {
  *         schema:
  *           type: string
  *         description: Admin identifier to store token against
+ *       - in: query
+ *         name: target
+ *         schema:
+ *           type: string
+ *           enum: [mobile]
+ *         description: Pass "mobile" to deep-link back into the mobile app after OAuth (requires MOBILE_FRONTEND_URL)
  *     responses:
  *       302:
  *         description: Redirect to Zoom OAuth
  */
-app.get('/oauth/authorize', (req, res) => {
+app.get('/oauth/authorize', async (req, res) => {
   try {
     requireEnv(ZOOM_OAUTH_CLIENT_ID, 'ZOOM_OAUTH_CLIENT_ID')
     requireEnv(ZOOM_OAUTH_REDIRECT_URL, 'ZOOM_OAUTH_REDIRECT_URL')
 
-    const adminId = req.query.adminId
-    const target = req.query.target
-    const state = adminId || 'unknown'
-    const targetState = target ? `${state}|${target}` : state
+    const adminId = req.query.adminId || 'unknown'
+    const target = req.query.target === 'mobile' ? 'mobile' : null
+    const state = await createOAuthState({ adminId, target })
     const authUrl =
       `https://zoom.us/oauth/authorize?response_type=code` +
       `&client_id=${ZOOM_OAUTH_CLIENT_ID}` +
       `&redirect_uri=${encodeURIComponent(ZOOM_OAUTH_REDIRECT_URL)}` +
-      `&state=${encodeURIComponent(targetState)}`
+      `&state=${encodeURIComponent(state)}`
 
     res.redirect(authUrl)
   } catch (error) {
@@ -310,21 +357,48 @@ app.get('/oauth/authorize', (req, res) => {
  *       302:
  *         description: Redirect to frontend with connection status
  *       400:
- *         description: Missing authorization code
+ *         description: Missing authorization code, or invalid/expired state
  */
 app.get('/oauth/callback', async (req, res) => {
-  const { code, state } = req.query
-  const rawState = typeof state === 'string' ? state : ''
-  const [adminId, target] = rawState.split('|')
+  const { code, state, error: zoomError } = req.query
+  let adminId = ''
   // MOBILE_FRONTEND_URL is expected to be the mobile app's registered
   // custom URL scheme (e.g. zoomtest://oauth-callback), not a web page —
   // a mobile browser-based OAuth flow has no way back into the native
   // app from a plain https:// redirect. Falls back to the web flow
-  // below if it isn't set, same as before this change.
-  const isMobile = target === 'mobile' && Boolean(MOBILE_FRONTEND_URL)
+  // below if it isn't set.
+  let isMobile = false
+
+  const redirectMobileFailure = (message) => {
+    // Without this, a failed or denied authorization leaves the mobile
+    // user stranded on a raw error page in the external browser with no
+    // way back into the app — deep-link back with success=false instead
+    // so the Flutter side can show its own error state.
+    const mobileParams = new URLSearchParams({
+      success: 'false',
+      error: typeof message === 'string' ? message : JSON.stringify(message),
+    })
+    return res.redirect(`${MOBILE_FRONTEND_URL}?${mobileParams.toString()}`)
+  }
 
   try {
+    // Resolve the state first, even when Zoom sent no `code` (e.g. the
+    // user tapped Deny), so a mobile flow can still be sent back to the app.
+    const stored = typeof state === 'string' ? await consumeOAuthState(state) : null
+    if (!stored) {
+      return res
+        .status(400)
+        .send('Invalid or expired OAuth state. Please start connecting Zoom again.')
+    }
+    adminId = stored.adminId
+    isMobile = stored.target === 'mobile' && Boolean(MOBILE_FRONTEND_URL)
+
     if (!code) {
+      if (isMobile) {
+        return redirectMobileFailure(
+          typeof zoomError === 'string' ? zoomError : 'Missing authorization code'
+        )
+      }
       return res.status(400).send('Missing authorization code')
     }
 
@@ -339,22 +413,14 @@ app.get('/oauth/callback', async (req, res) => {
       return res.redirect(`${MOBILE_FRONTEND_URL}?${mobileParams.toString()}`)
     }
 
-    // Web flow — unchanged from before this change.
+    // Web flow — same redirect as before.
     const redirectTo = FRONTEND_URL || 'http://localhost:5173'
     res.redirect(`${redirectTo}?zoom=connected`)
   } catch (error) {
     const message = error.response?.data || error.message
 
     if (isMobile) {
-      // Without this, a failed exchange leaves the mobile user stranded
-      // on a raw JSON error page in the external browser with no way
-      // back into the app — deep-link back with success=false instead
-      // so the Flutter side can show its own error state.
-      const mobileParams = new URLSearchParams({
-        success: 'false',
-        error: typeof message === 'string' ? message : JSON.stringify(message),
-      })
-      return res.redirect(`${MOBILE_FRONTEND_URL}?${mobileParams.toString()}`)
+      return redirectMobileFailure(message)
     }
 
     res.status(500).send(JSON.stringify(message))
