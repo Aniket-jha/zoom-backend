@@ -145,6 +145,21 @@ const saveTokenForAdmin = async (adminId, tokenData) => {
   )
 }
 
+const getUserDoc = async (uid) => {
+  if (!uid) return null
+  const firestore = await getFirestore()
+  const snap = await firestore.collection('users').doc(uid).get()
+  return snap.exists ? { id: snap.id, ...snap.data() } : null
+}
+
+// expiryDate is an optional "YYYY-MM-DD" (or any Date-parseable) string set
+// on an admin's own users/{uid} doc. Only admins can expire — superadmins
+// and regular users never have this field checked.
+const isAdminExpired = (userDoc) =>
+  userDoc?.role === 'admin' &&
+  Boolean(userDoc?.expiryDate) &&
+  new Date(userDoc.expiryDate).getTime() < Date.now()
+
 // OAuth `state` is a random one-time nonce, with the real context
 // ({adminId, target}) kept server-side. It used to be "<adminId>|<target>",
 // but Zoom's authorize page renders blank when state contains "|"
@@ -497,6 +512,10 @@ app.get('/api/zoom/token', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' })
     }
 
+    if (isAdminExpired(await getUserDoc(adminId))) {
+      return res.status(403).json({ error: 'This admin account has expired.' })
+    }
+
     const accessToken = await getValidAccessToken(adminId)
     if (!accessToken) {
       return res.status(404).json({ error: 'Zoom not connected for this admin' })
@@ -533,6 +552,10 @@ app.get('/api/zoom/zak', async (req, res) => {
     const adminId = req.query.adminId || decoded.uid
     if (adminId !== decoded.uid) {
       return res.status(403).json({ error: 'Forbidden' })
+    }
+
+    if (isAdminExpired(await getUserDoc(adminId))) {
+      return res.status(403).json({ error: 'This admin account has expired.' })
     }
 
     const accessToken = await getValidAccessToken(adminId)
@@ -654,6 +677,10 @@ app.get('/api/zoom/obf', async (req, res) => {
     }
     if (meeting.adminId !== adminId) {
       return res.status(403).json({ error: 'meetingId does not belong to adminId' })
+    }
+
+    if (isAdminExpired(await getUserDoc(adminId))) {
+      return res.status(403).json({ error: 'This admin account has expired.' })
     }
 
     const accessToken = await getValidAccessToken(adminId)
@@ -830,6 +857,10 @@ app.post('/api/zoom/meetings', async (req, res) => {
       return res.status(400).json({ error: 'adminId is required' })
     }
 
+    if (isAdminExpired(await getUserDoc(adminId))) {
+      return res.status(403).json({ error: 'This admin account has expired.' })
+    }
+
     const accessToken = await getValidAccessToken(adminId)
     if (!accessToken) {
       return res.status(401).json({ error: 'Zoom not connected for this admin' })
@@ -940,6 +971,10 @@ app.patch('/api/zoom/recording', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' })
     }
 
+    if (isAdminExpired(await getUserDoc(adminId))) {
+      return res.status(403).json({ error: 'This admin account has expired.' })
+    }
+
     const methodMap = {
       start: 'recording.start',
       stop: 'recording.stop',
@@ -1027,6 +1062,163 @@ app.get('/api/admin-meetings', async (req, res) => {
     const users = usersSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
 
     res.json({ adminId, meetings, users })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Resolves which (if any) users/{uid} doc the caller is allowed to act on
+// for delete/password-reset. A superadmin may act on any admin or user. An
+// admin may act only on a "user" doc they created (target.adminId ===
+// caller.uid) — never on another admin, and never on themselves here,
+// since both routes below are destructive/credential-changing and a
+// self-service path was explicitly out of scope.
+const resolveManageableTarget = async (callerUid, targetUid) => {
+  if (!targetUid || targetUid === callerUid) {
+    return { error: { status: 400, message: 'Invalid target user' } }
+  }
+
+  const caller = await getUserDoc(callerUid)
+  const target = await getUserDoc(targetUid)
+  if (!target) {
+    return { error: { status: 404, message: 'User not found' } }
+  }
+
+  const isSuperAdmin = caller?.role === 'superadmin'
+  const ownsTarget =
+    caller?.role === 'admin' && target.role === 'user' && target.adminId === callerUid
+
+  if (!isSuperAdmin && !ownsTarget) {
+    return { error: { status: 403, message: 'Forbidden' } }
+  }
+
+  return { target }
+}
+
+/**
+ * @swagger
+ * /api/admin/users/{uid}:
+ *   delete:
+ *     summary: Delete an admin or user account (Firebase Auth + Firestore)
+ *     tags: [Admin]
+ *     parameters:
+ *       - in: path
+ *         name: uid
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Deleted
+ *       400:
+ *         description: Invalid target user
+ *       401:
+ *         description: Missing or invalid auth token
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: User not found
+ */
+app.delete('/api/admin/users/:uid', async (req, res) => {
+  try {
+    const decoded = await verifyFirebaseIdToken(req)
+    if (!decoded) {
+      return res.status(401).json({ error: 'Missing or invalid auth token' })
+    }
+
+    const { error } = await resolveManageableTarget(decoded.uid, req.params.uid)
+    if (error) {
+      return res.status(error.status).json({ error: error.message })
+    }
+
+    // Deleting the Firestore doc alone isn't enough: the Firebase Auth
+    // record would still exist, so a deleted admin could still sign in —
+    // and the onAuthStateChanged auto-create path in the frontend would
+    // silently hand them a fresh profile. Tolerate the Auth record already
+    // being gone (e.g. a retried request).
+    await admin
+      .auth()
+      .deleteUser(req.params.uid)
+      .catch((err) => {
+        if (err.code !== 'auth/user-not-found') throw err
+      })
+
+    const firestore = await getFirestore()
+    await firestore.collection('users').doc(req.params.uid).delete()
+
+    res.json({ ok: true })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/**
+ * @swagger
+ * /api/admin/users/{uid}/password:
+ *   post:
+ *     summary: Reset an admin or user's password (Firebase Auth + mirrored Firestore field)
+ *     tags: [Admin]
+ *     parameters:
+ *       - in: path
+ *         name: uid
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               newPassword:
+ *                 type: string
+ *             required:
+ *               - newPassword
+ *     responses:
+ *       200:
+ *         description: Password updated
+ *       400:
+ *         description: Invalid target user, or newPassword too short
+ *       401:
+ *         description: Missing or invalid auth token
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: User not found
+ */
+app.post('/api/admin/users/:uid/password', async (req, res) => {
+  try {
+    const decoded = await verifyFirebaseIdToken(req)
+    if (!decoded) {
+      return res.status(401).json({ error: 'Missing or invalid auth token' })
+    }
+
+    const newPassword = req.body.newPassword
+    if (!newPassword || newPassword.length < 6) {
+      return res
+        .status(400)
+        .json({ error: 'newPassword is required and must be at least 6 characters' })
+    }
+
+    const { error } = await resolveManageableTarget(decoded.uid, req.params.uid)
+    if (error) {
+      return res.status(error.status).json({ error: error.message })
+    }
+
+    // The real credential (Firebase Auth password) and the mirrored
+    // Firestore `password` field both get written here, the same way
+    // handleCreateAdmin/handleCreateUser write both on account creation —
+    // UsersPage/AdminsPage read the Firestore copy for display.
+    await admin.auth().updateUser(req.params.uid, { password: newPassword })
+
+    const firestore = await getFirestore()
+    await firestore.collection('users').doc(req.params.uid).update({
+      password: newPassword,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    })
+
+    res.json({ ok: true })
   } catch (error) {
     res.status(500).json({ error: error.message })
   }
